@@ -1,16 +1,50 @@
-// p5.js 1.11.13
-// 1080 × 800，粉绿水纹与漂流的“愁”。
+﻿// p5.js 1.11.13
+// 1080 × 800，粉底绿水·流线化作“愁”字漂流。
+// 问君能有几多愁，恰似一江春水向东流。
 // 点击暂停 / 继续，按 S 保存。
 
 const PINK = "#FDE8F4";
+const PINK_PALE = "#FFF8FB"; // 右下端字色（绿水加深处字色变浅）
+const CHAR_SHADES = 5;       // 字色由深到浅的档位数
 const FLOW_SPEED = 48;
-const WORD_COUNT = 32;
 
 const BASE_W = 540;
 const BASE_H = 400;
 const STEPS = 360;
-const LEVELS = 48;
 const FADE_EDGE = 3;
+
+// 字流参数（替代原流线）
+const CHAR_GAP = 12;        // 相邻字的沿线间距
+const CHAR_SIZE = 14;     // 字头大小
+const CHAR_SPEED = 0.85;    // 字速相对水波速度的比例
+const END_FADE = 22;        // 河道两端淡入淡出的距离
+const MIN_DRAW_ALPHA = 0.03;// 低于此透明度不绘制
+const SHORE_MARGIN = 10;     // 字轨迹与岸线的最小间距（基准单位）
+
+// 字潮呼吸（“问君能有几多愁”：愁绪缓缓涨落）
+const BREATH_RATE = 0.35;   // 呼吸角速度，周期约 18 秒
+const BREATH_DEPTH = 0.14;  // 呼吸幅度
+
+// 末端消散（“恰似一江春水向东流”：愁到远处渐渐化开）
+const DISSOLVE_AT = 0.9;    // 航程 90% 处开始消散
+const DISSOLVE_LEN = 0.1;   // 消散段长度
+
+// 花朵点睛（春意）：偶尔一朵五瓣小花顺流漂过，多了会闹
+const PETAL_MAX = 20;            // 同屏最多朵数
+const PETAL_INTERVAL_MIN = 0;  // 两次出现的最小间隔（秒）
+const PETAL_INTERVAL_MAX = 2;  // 两次出现的最大间隔（秒）
+const PETAL_SPEED = 1.5;        // 相对字流的速度倍数
+const PETAL_SIZE = 2;           // 花朵尺度（基准单位，约为字头两倍）
+const PETAL_COLOR = "#fbc1d6";  // 花瓣玫瑰色（与嫩粉字头区分开）
+const PISTIL_COLOR = "#FFE9A6"; // 花蕊淡黄色
+
+// 拖尾定义：d = 落后距离，a = 相对亮度，s = 相对大小
+const TRAILS = [
+  { d: 0,  a: 0.40, s: 1.25 },
+  { d: 6,  a: 0.45, s: 0.85 },
+  { d: 12, a: 0.18, s: 0.72 },
+  { d: 18, a: 0.07, s: 0.62 }
+];
 
 const LEFT = [
   [-46, -24],
@@ -28,7 +62,7 @@ const LEFT = [
   [509, 401, 536, 394, 580, 399]
 ];
 
-const RIGHT = [
+const RIGHT_EDGE = [
   [20, -16],
   [52, 2, 67, 32, 112, 31],
   [141, 33, 152, 23, 185, 33],
@@ -47,13 +81,15 @@ const RIGHT = [
 let edgeA = [];
 let edgeB = [];
 let streams = [];
-let words = [];
 let water;
 let still;
-let wordImage;
+let charShadeSharp = [];
+let charShadeSoft = [];
 
 let flowTime = 0;
 let playing = true;
+let petals = [];
+let nextPetalAt = 16; // 第一朵花出现的时刻（秒）
 
 function setup() {
   createCanvas(1080, 800);
@@ -64,7 +100,7 @@ function setup() {
   for (let i = 0; i <= STEPS; i++) {
     const s = i / STEPS * (LEFT.length - 1);
     edgeA.push(sampleCurve(LEFT, s));
-    edgeB.push(sampleCurve(RIGHT, s));
+    edgeB.push(sampleCurve(RIGHT_EDGE, s));
   }
 
   water = new Path2D();
@@ -85,7 +121,8 @@ function setup() {
 
   water.closePath();
 
-  for (const u of [0.017, 0.035, 0.965, 0.984]) {
+  // 贴岸的两对流线整体向内收，避免字压到岸线
+  for (const u of [0.05, 0.09, 0.91, 0.95]) {
     addStream(u, 0, -1);
   }
 
@@ -95,6 +132,15 @@ function setup() {
     for (let offset = -1; offset <= 1; offset++) {
       addStream(centers[g], offset, g);
     }
+  }
+
+  // 字流贴图：右下深水段字色变浅，预渲染多档（锐利字头 + 模糊光晕）
+  for (let i = 0; i < CHAR_SHADES; i++) {
+    const t = i / (CHAR_SHADES - 1);
+    const color = mixColor(PINK, PINK_PALE, t);
+
+    charShadeSharp.push(makeCharSprite(color, 40, 0));
+    charShadeSoft.push(makeCharSprite(color, 40, 5));
   }
 
   // 缓存静态底图（粉色晕染底）
@@ -121,14 +167,15 @@ function setup() {
   ctx.save();
   ctx.scale(width / BASE_W, height / BASE_H);
 
-  // 渐变绿色水体
+  // 渐变绿色水体（右下角最后 15% 加深，深度不超过原版最深色）
   const green = ctx.createLinearGradient(0, 0, 450, 400);
 
   green.addColorStop(0.00, "#BBE9A3");
   green.addColorStop(0.28, "#A7E985");
   green.addColorStop(0.52, "#9BE176");
   green.addColorStop(0.76, "#B3F490");
-  green.addColorStop(1.00, "#BBE9A3");
+  green.addColorStop(0.85, "#A8E380");
+  green.addColorStop(1.00, "#9BE176");
 
   ctx.fillStyle = green;
   ctx.fill(water);
@@ -138,32 +185,7 @@ function setup() {
   ctx.lineWidth = 0.55;
   ctx.stroke(water);
 
-  ctx.clip(water);
-
-  // 粉色基础线条
-  ctx.globalAlpha = 0.35;
-  ctx.lineWidth = 0.5;
-
-  for (const stream of streams) {
-    ctx.stroke(stream.path);
-  }
-
   ctx.restore();
-
-  // “愁”字只绘制一次，动画中重复使用
-  wordImage = createGraphics(40, 40);
-  wordImage.pixelDensity(2);
-  wordImage.clear();
-  wordImage.noStroke();
-  wordImage.fill(PINK);
-  wordImage.textFont('"Songti SC", "SimSun", serif');
-  wordImage.textAlign(CENTER, CENTER);
-  wordImage.textSize(32);
-  wordImage.text("愁", 20, 19);
-
-  for (let i = 0; i < WORD_COUNT; i++) {
-    addWord(i);
-  }
 }
 
 function draw() {
@@ -171,63 +193,11 @@ function draw() {
 
   flowTime += dt;
 
+  // 字潮呼吸：整体亮度以约 18 秒为周期缓缓涨落
+  const breath =
+    1 - BREATH_DEPTH * (0.5 - 0.5 * Math.sin(flowTime * BREATH_RATE));
+
   image(still, 0, 0);
-
-  const batches = [];
-
-  for (let i = 0; i < LEVELS; i++) {
-    batches.push(new Path2D());
-  }
-
-  for (const stream of streams) {
-    const shift =
-      flowTime * FLOW_SPEED * stream.speed + stream.phase;
-
-    const length = stream.length;
-    const period = length + stream.gap;
-    const segments = stream.segments;
-
-    for (let i = 0; i < segments.length; i += 5) {
-      const q =
-        ((segments[i + 4] - shift) % period + period) % period;
-
-      const low =
-        0.24 * softBand(q, 0, length);
-
-      const middle =
-        0.42 * softBand(
-          q,
-          length * 0.20,
-          length * 0.65
-        );
-
-      const high =
-        0.85 * softBand(
-          q,
-          length * 0.62,
-          length * 0.28
-        );
-
-      const alpha =
-        1 - (1 - low) * (1 - middle) * (1 - high);
-
-      const level = Math.round(
-        alpha * (LEVELS - 1)
-      );
-
-      if (level === 0) continue;
-
-      batches[level].moveTo(
-        segments[i],
-        segments[i + 1]
-      );
-
-      batches[level].lineTo(
-        segments[i + 2],
-        segments[i + 3]
-      );
-    }
-  }
 
   const ctx = drawingContext;
 
@@ -236,91 +206,262 @@ function draw() {
   ctx.scale(width / BASE_W, height / BASE_H);
   ctx.clip(water);
 
-  ctx.strokeStyle = PINK;
-  ctx.lineWidth = 0.65;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
+  // 字流：沿原流线轨迹漂流，带光晕与拖尾
+  for (const stream of streams) {
+    const shift =
+      flowTime * FLOW_SPEED * stream.speed + stream.phase;
 
-  for (let i = 1; i < LEVELS; i++) {
-    ctx.globalAlpha = i / (LEVELS - 1);
-    ctx.stroke(batches[i]);
+    const period = stream.length + stream.gap;
+    const total = stream.total;
+
+    for (const ch of stream.chars) {
+      const d = (ch.off + shift * CHAR_SPEED) % total;
+
+      const q =
+        ((d - shift) % period + period) % period;
+
+      const low =
+        0.24 * softBand(q, 0, stream.length);
+
+      const middle =
+        0.42 * softBand(
+          q,
+          stream.length * 0.20,
+          stream.length * 0.65
+        );
+
+      const high =
+        0.85 * softBand(
+          q,
+          stream.length * 0.62,
+          stream.length * 0.28
+        );
+
+      const alpha =
+        (1 - (1 - low) * (1 - middle) * (1 - high)) * breath;
+
+      if (alpha < MIN_DRAW_ALPHA) continue;
+
+      const endFade = Math.min(
+        1,
+        d / END_FADE,
+        (total - d) / END_FADE
+      );
+
+      const raw = d / total;
+      const p = pointAt(stream.points, d);
+
+      // 末端消散：最后 10% 航程渐渐虚化缩小
+      const dis = raw > DISSOLVE_AT ?
+        (raw - DISSOLVE_AT) / DISSOLVE_LEN : 0;
+      const size =
+        CHAR_SIZE * (0.9 + 0.18 * alpha) * (1 - 0.45 * dis);
+
+      // 流到右下深水段字色变浅：前 55% 航程保持原色
+      const tone = raw < 0.55 ? 0 : (raw - 0.55) / 0.45;
+
+      const idx = Math.round(tone * (CHAR_SHADES - 1));
+
+      // 拖尾与光晕（先画，垫在字头下面）
+      for (const tr of TRAILS) {
+        const gd = d - tr.d;
+
+        if (gd < 0) continue;
+
+        const gEnd = Math.min(
+          1,
+          gd / END_FADE,
+          (total - gd) / END_FADE
+        );
+
+        const ga = alpha * tr.a * endFade * gEnd;
+
+        if (ga < MIN_DRAW_ALPHA) continue;
+
+        const gp = pointAt(stream.points, gd);
+        const gs = CHAR_SIZE * tr.s;
+
+        ctx.globalAlpha = ga;
+        ctx.drawImage(
+          charShadeSoft[idx].canvas,
+          gp.x - gs / 2,
+          gp.y - gs / 2,
+          gs,
+          gs
+        );
+      }
+
+      // 字头（末端由锐利渐渐虚化）
+      if (dis > 0) {
+        ctx.globalAlpha = alpha * endFade * (1 - dis);
+        ctx.drawImage(
+          charShadeSharp[idx].canvas,
+          p.x - size / 2,
+          p.y - size / 2,
+          size,
+          size
+        );
+
+        ctx.globalAlpha = alpha * endFade * dis;
+        ctx.drawImage(
+          charShadeSoft[idx].canvas,
+          p.x - size / 2,
+          p.y - size / 2,
+          size,
+          size
+        );
+      } else {
+        ctx.globalAlpha = alpha * endFade;
+        ctx.drawImage(
+          charShadeSharp[idx].canvas,
+          p.x - size / 2,
+          p.y - size / 2,
+          size,
+          size
+        );
+      }
+    }
   }
 
-  // 小字沿独立轨迹漂流
-  for (const word of words) {
-    word.distance =
-      (word.distance + word.speed * dt) % word.total;
+  // 花朵点睛：偶尔一朵五瓣小花顺流漂过，落在水面上
+  if (flowTime >= nextPetalAt && petals.length < PETAL_MAX) {
+    spawnPetal();
+    nextPetalAt =
+      flowTime +
+      random(PETAL_INTERVAL_MIN, PETAL_INTERVAL_MAX);
+  }
 
-    const p = pointOnRoute(
-      word.route,
-      word.distance
-    );
+  for (let i = petals.length - 1; i >= 0; i--) {
+    const petal = petals[i];
+
+    petal.d += petal.speed * dt;
+
+    if (petal.d >= petal.stream.total) {
+      petals.splice(i, 1);
+      continue;
+    }
 
     const fade = Math.min(
       1,
-      word.distance / 18,
-      (word.total - word.distance) / 18
+      petal.d / 30,
+      (petal.stream.total - petal.d) / 30
     );
 
-    ctx.globalAlpha =
-      word.opacity * Math.max(0, fade);
-
-    ctx.drawImage(
-      wordImage.canvas,
-      p.x - word.size / 2,
-      p.y - word.size / 2,
-      word.size,
-      word.size
+    const p = pointAt(petal.stream.points, petal.d);
+    const ahead = pointAt(
+      petal.stream.points,
+      Math.min(petal.stream.total, petal.d + 6)
     );
+    const along = Math.atan2(ahead.y - p.y, ahead.x - p.x);
+    const sway =
+      Math.sin(flowTime * 1.3 + petal.phase) * 1.2;
+
+    ctx.save();
+    ctx.translate(
+      p.x + Math.cos(along + Math.PI / 2) * sway,
+      p.y + Math.sin(along + Math.PI / 2) * sway
+    );
+    ctx.rotate(petal.spin * flowTime + petal.phase);
+    ctx.globalAlpha = 0.95 * Math.max(0, fade);
+
+    // 五片花瓣环绕排列
+    ctx.fillStyle = PETAL_COLOR;
+
+    for (let pi = 0; pi < 5; pi++) {
+      const a = pi / 5 * Math.PI * 2;
+      const px = Math.cos(a) * petal.size * 0.75;
+      const py = Math.sin(a) * petal.size * 0.75;
+
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(a);
+      ctx.beginPath();
+      ctx.ellipse(
+        0,
+        0,
+        petal.size * 0.62,
+        petal.size * 0.38,
+        0,
+        0,
+        Math.PI * 2
+      );
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 花蕊
+    ctx.fillStyle = PISTIL_COLOR;
+    ctx.beginPath();
+    ctx.arc(0, 0, petal.size * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
   }
 
+  ctx.globalAlpha = 1;
   ctx.restore();
 }
 
-function addWord(id) {
-  const route = [];
+// 沿单条流线的弧长等距布字
+function addStream(center, offset, group) {
+  const points = [];
 
-  const lane = random(0.08, 0.92);
-  const phase = random(Math.PI * 2);
-
-  let total = 0;
   let previous = null;
-  let lastVisible = 0;
+  let totalDistance = 0;
 
   for (let i = 0; i <= STEPS; i++) {
     const s = i / STEPS * (LEFT.length - 1);
 
-    const u =
-      lane +
-      Math.sin(s * 0.85 + phase) * 0.025;
-
     const a = edgeA[i];
     const b = edgeB[i];
 
-    const x = a.x + (b.x - a.x) * u;
-    const y = a.y + (b.y - a.y) * u;
+    let u = center;
 
-    if (previous) {
-      total += Math.hypot(
-        x - previous.x,
-        y - previous.y
-      );
+    if (group >= 0) {
+      const drift =
+        Math.sin(
+          s * 1.15 + group * 1.7
+        ) * 0.047 +
+        Math.sin(
+          s * 2.2 + group
+        ) * 0.021;
+
+      const opening =
+        0.5 +
+        0.5 * Math.sin(
+          s * 1.8 + group
+        );
+
+      u +=
+        drift +
+        offset *
+        (0.012 + 0.045 * opening * opening);
     }
 
-    route.push({
+    // 轨迹向岸内收缩：按字高与岸线保持间距
+    const shoreWidth = Math.hypot(b.x - a.x, b.y - a.y);
+    const shoreLimit = Math.min(
+      0.5,
+      SHORE_MARGIN / Math.max(1, shoreWidth)
+    );
+
+    u = Math.min(Math.max(u, shoreLimit), 1 - shoreLimit);
+
+    const x =
+      a.x + (b.x - a.x) * u;
+
+    const y =
+      a.y + (b.y - a.y) * u;
+
+    if (previous !== null) {
+      totalDistance += Math.hypot(x - previous.x, y - previous.y);
+    }
+
+    points.push({
       x: x,
       y: y,
-      distance: total
+      d: totalDistance
     });
-
-    if (
-      x >= -10 &&
-      x <= BASE_W + 10 &&
-      y >= -10 &&
-      y <= BASE_H + 10
-    ) {
-      lastVisible = i;
-    }
 
     previous = {
       x: x,
@@ -328,52 +469,66 @@ function addWord(id) {
     };
   }
 
-  route.length = Math.min(
-    route.length,
-    lastVisible + 2
-  );
+  const chars = [];
+  const count = Math.floor(totalDistance / CHAR_GAP);
 
-  total = route[route.length - 1].distance;
+  for (let i = 0; i < count; i++) {
+    chars.push({
+      off: (i + 0.5) * CHAR_GAP
+    });
+  }
 
-  words.push({
-    route: route,
-    total: total,
-    distance:
-      total * (id + random(0.1, 0.9)) / WORD_COUNT,
-    speed: random(19, 29),
-    size: random(10, 14),
-    opacity: random(0.65, 0.88)
+  const id = streams.length;
+
+  streams.push({
+    points: points,
+    chars: chars,
+    total: totalDistance,
+    length: 65 + (id % 4) * 13,
+    gap: 105 + (id % 3) * 23,
+    phase: id * 39,
+    speed: 0.88 + (id % 5) * 0.055
   });
 }
 
-function pointOnRoute(route, distance) {
+// 二分查找弧长 d 处的坐标
+function pointAt(points, d) {
   let low = 0;
-  let high = route.length - 1;
+  let high = points.length - 1;
 
   while (high - low > 1) {
     const mid = (low + high) >> 1;
 
-    if (route[mid].distance < distance) {
+    if (points[mid].d < d) {
       low = mid;
     } else {
       high = mid;
     }
   }
 
-  const a = route[low];
-  const b = route[high];
-
+  const p0 = points[low];
+  const p1 = points[high];
   const t =
-    (distance - a.distance) /
-    Math.max(
-      0.0001,
-      b.distance - a.distance
-    );
+    (d - p0.d) / Math.max(0.0001, p1.d - p0.d);
 
   return {
-    x: a.x + (b.x - a.x) * t,
-    y: a.y + (b.y - a.y) * t
+    x: p0.x + (p1.x - p0.x) * t,
+    y: p0.y + (p1.y - p0.y) * t
   };
+}
+
+// 随机挑一条流线放下一朵花
+function spawnPetal() {
+  const stream = streams[Math.floor(random(streams.length))];
+
+  petals.push({
+    stream: stream,
+    d: random(0, stream.total * 0.1),
+    speed: FLOW_SPEED * stream.speed * CHAR_SPEED * PETAL_SPEED,
+    size: PETAL_SIZE * random(0.9, 1.2),
+    spin: random(0.4, 0.9) * (random() < 0.5 ? -1 : 1),
+    phase: random(Math.PI * 2)
+  });
 }
 
 function softBand(position, start, length) {
@@ -388,6 +543,27 @@ function softBand(position, start, length) {
   const t = d / FADE_EDGE;
 
   return t * t * (3 - 2 * t);
+}
+
+// 预渲染一枚指定颜色的“愁”字贴图，可带模糊
+function makeCharSprite(color, px, blurPx) {
+  const img = createGraphics(64, 64);
+
+  img.pixelDensity(2);
+  img.clear();
+
+  if (blurPx > 0) {
+    img.drawingContext.filter = "blur(" + blurPx + "px)";
+  }
+
+  img.noStroke();
+  img.fill(color);
+  img.textFont('"Songti SC", "SimSun", serif');
+  img.textAlign(CENTER, CENTER);
+  img.textSize(px);
+  img.text("愁", 32, 32);
+
+  return img;
 }
 
 // 在底图上绘制大块柔边晕染色斑，模拟参考图的水彩粉底
@@ -422,109 +598,24 @@ function hexWithAlpha(hex, a) {
   return "rgba(" + r + ", " + g + ", " + b + ", " + a + ")";
 }
 
-function addStream(center, offset, group) {
-  const path = new Path2D();
-  const segments = [];
+// 两个 hex 颜色按 t 插值
+function mixColor(a, b, t) {
+  const r0 = parseInt(a.slice(1, 3), 16);
+  const g0 = parseInt(a.slice(3, 5), 16);
+  const b0 = parseInt(a.slice(5, 7), 16);
+  const r1 = parseInt(b.slice(1, 3), 16);
+  const g1 = parseInt(b.slice(3, 5), 16);
+  const b1 = parseInt(b.slice(5, 7), 16);
 
-  let previous = null;
-  let totalDistance = 0;
+  const r = Math.round(r0 + (r1 - r0) * t);
+  const g = Math.round(g0 + (g1 - g0) * t);
+  const bl = Math.round(b0 + (b1 - b0) * t);
 
-  for (let i = 0; i <= STEPS; i++) {
-    const s = i / STEPS * (LEFT.length - 1);
-
-    const a = edgeA[i];
-    const b = edgeB[i];
-
-    let u = center;
-
-    if (group >= 0) {
-      const drift =
-        Math.sin(
-          s * 1.15 + group * 1.7
-        ) * 0.047 +
-        Math.sin(
-          s * 2.2 + group
-        ) * 0.021;
-
-      const opening =
-        0.5 +
-        0.5 * Math.sin(
-          s * 1.8 + group
-        );
-
-      u +=
-        drift +
-        offset *
-        (0.012 + 0.045 * opening * opening);
-    }
-
-    const x =
-      a.x + (b.x - a.x) * u;
-
-    const y =
-      a.y + (b.y - a.y) * u;
-
-    if (previous === null) {
-      path.moveTo(x, y);
-    } else {
-      path.lineTo(x, y);
-
-      const dx = x - previous.x;
-      const dy = y - previous.y;
-      const distance = Math.hypot(dx, dy);
-
-      const count = Math.max(
-        1,
-        Math.ceil(distance / 1.5)
-      );
-
-      for (let k = 0; k < count; k++) {
-        const t0 = k / count;
-        const t1 = (k + 1) / count;
-
-        const x0 = previous.x + dx * t0;
-        const y0 = previous.y + dy * t0;
-        const x1 = previous.x + dx * t1;
-        const y1 = previous.y + dy * t1;
-
-        if (
-          Math.max(x0, x1) < 0 ||
-          Math.min(x0, x1) > BASE_W ||
-          Math.max(y0, y1) < 0 ||
-          Math.min(y0, y1) > BASE_H
-        ) {
-          continue;
-        }
-
-        segments.push(
-          x0,
-          y0,
-          x1,
-          y1,
-          totalDistance +
-          distance * (t0 + t1) * 0.5
-        );
-      }
-
-      totalDistance += distance;
-    }
-
-    previous = {
-      x: x,
-      y: y
-    };
+  function to2(v) {
+    return v.toString(16).padStart(2, "0");
   }
 
-  const id = streams.length;
-
-  streams.push({
-    path: path,
-    segments: new Float32Array(segments),
-    length: 65 + (id % 4) * 13,
-    gap: 105 + (id % 3) * 23,
-    phase: id * 39,
-    speed: 0.88 + (id % 5) * 0.055
-  });
+  return "#" + to2(r) + to2(g) + to2(bl);
 }
 
 function sampleCurve(edge, s) {
@@ -586,7 +677,7 @@ function mousePressed() {
 function keyPressed() {
   if (key === "s" || key === "S") {
     saveCanvas(
-      "pink-green-flowing-river",
+      "chou-drift-river",
       "png"
     );
   }
