@@ -1,7 +1,7 @@
 ﻿// p5.js 1.11.13
 // 1080 × 800，粉底绿水·流线化作“愁”字漂流。
 // 问君能有几多愁，恰似一江春水向东流。
-// 点击暂停 / 继续，按 S 保存。
+// 点击水面：涟漪荡开 + 小花绽放；点击岸外：暂停 / 继续。按 S 保存。
 
 const PINK = "#FDE8F4";
 const PINK_PALE = "#FFF8FB"; // 右下端字色（绿水加深处字色变浅）
@@ -15,21 +15,21 @@ const FADE_EDGE = 3;
 
 // 字流参数（替代原流线）
 const CHAR_GAP = 10;        // 相邻字的沿线间距
-const CHAR_SIZE = 10.5;     // 字头大小
+const CHAR_SIZE = 12;     // 字头大小
 const CHAR_SPEED = 0.85;    // 字速相对水波速度的比例
 const END_FADE = 22;        // 河道两端淡入淡出的距离
 const MIN_DRAW_ALPHA = 0.03;// 低于此透明度不绘制
-const SHORE_MARGIN = 6;     // 字轨迹与岸线的最小间距（基准单位）
+const SHORE_MARGIN = 15;     // 字轨迹与岸线的最小间距（基准单位）
 
 // 字潮呼吸（“问君能有几多愁”：愁绪缓缓涨落）
 const BREATH_RATE = 0.35;   // 呼吸角速度，周期约 18 秒
-const BREATH_DEPTH = 0.14;  // 呼吸幅度
+const BREATH_DEPTH = 0.2;  // 呼吸幅度
 
 // 末端消散（“恰似一江春水向东流”：愁到远处渐渐化开）
 const DISSOLVE_AT = 0.9;    // 航程 90% 处开始消散
 const DISSOLVE_LEN = 0.1;   // 消散段长度
 
-// 花朵点睛（春意）：偶尔一朵五瓣小花顺流漂过，多了会闹
+// 花朵点睛（春意）：小花开满水面，落英缤纷
 const PETAL_MAX = 20;            // 同屏最多朵数
 const PETAL_INTERVAL_MIN = 2;  // 两次出现的最小间隔（秒）
 const PETAL_INTERVAL_MAX = 5;  // 两次出现的最大间隔（秒）
@@ -37,6 +37,13 @@ const PETAL_SPEED = 1.5;        // 相对字流的速度倍数
 const PETAL_SIZE = 2;           // 花朵尺度（基准单位，约为字头两倍）
 const PETAL_COLOR = "#f3bed2";  // 花瓣玫瑰色（与嫩粉字头区分开）
 const PISTIL_COLOR = "#FFE9A6"; // 花蕊淡黄色
+
+// 涟漪互动（点击水面）
+const RIPPLE_SPEED = 80;  // 波环扩散速度（基准单位/秒）
+const RIPPLE_BAND = 55;    // 波环宽度
+const RIPPLE_PUSH = 7;     // 最大推挤距离
+const RIPPLE_LIFE = 10;   // 涟漪寿命（秒）
+const RIPPLE_MAX = 4;      // 同时最多涟漪数
 
 // 拖尾定义：d = 落后距离，a = 相对亮度，s = 相对大小
 const TRAILS = [
@@ -90,6 +97,8 @@ let flowTime = 0;
 let playing = true;
 let petals = [];
 let nextPetalAt = 0; // 开场即出现第一朵
+let ripples = [];
+let waterMask;
 
 function setup() {
   createCanvas(1080, 800);
@@ -147,6 +156,15 @@ function setup() {
       phase: random(Math.PI * 2)
     });
   }
+
+  // 水域掩码：用于判断点击是否落在河面上
+  waterMask = createGraphics(270, 200);
+  waterMask.pixelDensity(1);
+  waterMask.noStroke();
+  waterMask.scale(0.5, 0.5);
+  waterMask.fill(255);
+  waterMask.drawingContext.fill(water);
+  waterMask.loadPixels();
 
   // 字流贴图：右下深水段字色变浅，预渲染多档（锐利字头 + 模糊光晕）
   for (let i = 0; i < CHAR_SHADES; i++) {
@@ -264,6 +282,7 @@ function draw() {
 
       const raw = d / total;
       const p = pointAt(stream.points, d);
+      applyRippleTo(p);
 
       // 末端消散：最后 10% 航程渐渐虚化缩小
       const dis = raw > DISSOLVE_AT ?
@@ -293,6 +312,7 @@ function draw() {
         if (ga < MIN_DRAW_ALPHA) continue;
 
         const gp = pointAt(stream.points, gd);
+        applyRippleTo(gp);
         const gs = CHAR_SIZE * tr.s;
 
         ctx.globalAlpha = ga;
@@ -337,7 +357,7 @@ function draw() {
     }
   }
 
-  // 花朵点睛：开场已有两朵，之后偶尔补一朵
+  // 花朵点睛：开场已有两朵，之后不断补一朵
   if (flowTime >= nextPetalAt && petals.length < PETAL_MAX) {
     spawnPetal();
     nextPetalAt =
@@ -362,6 +382,7 @@ function draw() {
     );
 
     const p = pointAt(petal.stream.points, petal.d);
+    applyRippleTo(p);
     const ahead = pointAt(
       petal.stream.points,
       Math.min(petal.stream.total, petal.d + 6)
@@ -370,12 +391,22 @@ function draw() {
     const sway =
       Math.sin(flowTime * 1.3 + petal.phase) * 1.2;
 
+    // 点击绽放的花朵有一个从 0 放大的“开花”动画
+    let bloom = 1;
+
+    if (petal.born !== undefined) {
+      bloom = easeOutBack(
+        Math.min(1, (flowTime - petal.born) / 0.6)
+      );
+    }
+
     ctx.save();
     ctx.translate(
       p.x + Math.cos(along + Math.PI / 2) * sway,
       p.y + Math.sin(along + Math.PI / 2) * sway
     );
     ctx.rotate(petal.spin * flowTime + petal.phase);
+    ctx.scale(bloom, bloom);
     ctx.globalAlpha = 0.95 * Math.max(0, fade);
 
     // 五片花瓣环绕排列
@@ -545,6 +576,88 @@ function spawnPetal() {
   });
 }
 
+// 判断基准坐标是否落在河面上
+function isWater(bx, by) {
+  const mx = Math.floor(bx * 0.5);
+  const my = Math.floor(by * 0.5);
+
+  if (
+    mx < 0 ||
+    my < 0 ||
+    mx >= waterMask.width ||
+    my >= waterMask.height
+  ) {
+    return false;
+  }
+
+  return waterMask.pixels[(my * waterMask.width + mx) * 4 + 3] > 127;
+}
+
+// 把涟漪的推挤量叠加到某个点上
+function applyRippleTo(pt) {
+  for (const r of ripples) {
+    const age = flowTime - r.t;
+
+    if (age < 0 || age > RIPPLE_LIFE) continue;
+
+    const dx = pt.x - r.x;
+    const dy = pt.y - r.y;
+    const dist = Math.max(0.001, Math.hypot(dx, dy));
+    const diff = dist - age * RIPPLE_SPEED;
+
+    if (Math.abs(diff) >= RIPPLE_BAND) continue;
+
+    const w = 1 - Math.abs(diff) / RIPPLE_BAND;
+    const k =
+      (Math.sin(w * Math.PI) * RIPPLE_PUSH * (1 - age / RIPPLE_LIFE)) /
+      dist;
+
+    pt.x += dx * k;
+    pt.y += dy * k;
+  }
+}
+
+// 在离点击位置最近的流线上绽放一朵花
+function bloomFlowerAt(bx, by) {
+  let best = null;
+
+  for (const stream of streams) {
+    const pts = stream.points;
+
+    for (let i = 0; i < pts.length; i += 4) {
+      const dx = pts[i].x - bx;
+      const dy = pts[i].y - by;
+      const d2 = dx * dx + dy * dy;
+
+      if (best === null || d2 < best.d2) {
+        best = { stream: stream, d: pts[i].d, d2: d2 };
+      }
+    }
+  }
+
+  if (best === null) return;
+
+  petals.push({
+    stream: best.stream,
+    d: Math.min(best.d, best.stream.total - 30),
+    speed: FLOW_SPEED * best.stream.speed * CHAR_SPEED * PETAL_SPEED,
+    size: PETAL_SIZE * random(0.95, 1.2),
+    spin: random(0.4, 0.9) * (random() < 0.5 ? -1 : 1),
+    phase: random(Math.PI * 2),
+    born: flowTime
+  });
+
+  if (petals.length > PETAL_MAX + 6) petals.shift();
+}
+
+// 弹性缓动：花开时从小放大并轻微过冲
+function easeOutBack(t) {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+}
+
 function softBand(position, start, length) {
   const d = Math.min(
     position - start,
@@ -670,15 +783,20 @@ function sampleCurve(edge, s) {
 }
 
 function mousePressed() {
-  if (
-    mouseX < 0 ||
-    mouseX > width ||
-    mouseY < 0 ||
-    mouseY > height
-  ) {
+  const bx = mouseX / (width / BASE_W);
+  const by = mouseY / (height / BASE_H);
+
+  // 点在河面上：激起涟漪，并让一朵小花在点击处绽放
+  if (isWater(bx, by)) {
+    ripples.push({ x: bx, y: by, t: flowTime });
+
+    if (ripples.length > RIPPLE_MAX) ripples.shift();
+
+    bloomFlowerAt(bx, by);
     return;
   }
 
+  // 点在岸外：暂停 / 继续
   playing = !playing;
 
   if (playing) {
