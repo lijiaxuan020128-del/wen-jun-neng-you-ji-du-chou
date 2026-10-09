@@ -14,12 +14,12 @@ const STEPS = 360;
 const FADE_EDGE = 3;
 
 // 字流参数（替代原流线）
-const CHAR_GAP = 12;        // 相邻字的沿线间距
-const CHAR_SIZE = 14;     // 字头大小
+const CHAR_GAP = 10;        // 相邻字的沿线间距
+const CHAR_SIZE = 10.5;     // 字头大小
 const CHAR_SPEED = 0.85;    // 字速相对水波速度的比例
 const END_FADE = 22;        // 河道两端淡入淡出的距离
 const MIN_DRAW_ALPHA = 0.03;// 低于此透明度不绘制
-const SHORE_MARGIN = 10;     // 字轨迹与岸线的最小间距（基准单位）
+const SHORE_MARGIN = 6;     // 字轨迹与岸线的最小间距（基准单位）
 
 // 字潮呼吸（“问君能有几多愁”：愁绪缓缓涨落）
 const BREATH_RATE = 0.35;   // 呼吸角速度，周期约 18 秒
@@ -31,11 +31,11 @@ const DISSOLVE_LEN = 0.1;   // 消散段长度
 
 // 花朵点睛（春意）：偶尔一朵五瓣小花顺流漂过，多了会闹
 const PETAL_MAX = 20;            // 同屏最多朵数
-const PETAL_INTERVAL_MIN = 0;  // 两次出现的最小间隔（秒）
-const PETAL_INTERVAL_MAX = 2;  // 两次出现的最大间隔（秒）
+const PETAL_INTERVAL_MIN = 2;  // 两次出现的最小间隔（秒）
+const PETAL_INTERVAL_MAX = 5;  // 两次出现的最大间隔（秒）
 const PETAL_SPEED = 1.5;        // 相对字流的速度倍数
 const PETAL_SIZE = 2;           // 花朵尺度（基准单位，约为字头两倍）
-const PETAL_COLOR = "#fbc1d6";  // 花瓣玫瑰色（与嫩粉字头区分开）
+const PETAL_COLOR = "#f3bed2";  // 花瓣玫瑰色（与嫩粉字头区分开）
 const PISTIL_COLOR = "#FFE9A6"; // 花蕊淡黄色
 
 // 拖尾定义：d = 落后距离，a = 相对亮度，s = 相对大小
@@ -89,7 +89,7 @@ let charShadeSoft = [];
 let flowTime = 0;
 let playing = true;
 let petals = [];
-let nextPetalAt = 16; // 第一朵花出现的时刻（秒）
+let nextPetalAt = 0; // 开场即出现第一朵
 
 function setup() {
   createCanvas(1080, 800);
@@ -132,6 +132,20 @@ function setup() {
     for (let offset = -1; offset <= 1; offset++) {
       addStream(centers[g], offset, g);
     }
+  }
+
+  // 开场先在河道中段放两朵，不用等它们从上游漂来
+  for (let i = 0; i < 2; i++) {
+    const stream = streams[Math.floor(random(streams.length))];
+
+    petals.push({
+      stream: stream,
+      d: random(stream.total * 0.25, stream.total * 0.6),
+      speed: FLOW_SPEED * stream.speed * CHAR_SPEED * PETAL_SPEED,
+      size: PETAL_SIZE * random(0.9, 1.2),
+      spin: random(0.4, 0.9) * (random() < 0.5 ? -1 : 1),
+      phase: random(Math.PI * 2)
+    });
   }
 
   // 字流贴图：右下深水段字色变浅，预渲染多档（锐利字头 + 模糊光晕）
@@ -323,7 +337,7 @@ function draw() {
     }
   }
 
-  // 花朵点睛：偶尔一朵五瓣小花顺流漂过，落在水面上
+  // 花朵点睛：开场已有两朵，之后偶尔补一朵
   if (flowTime >= nextPetalAt && petals.length < PETAL_MAX) {
     spawnPetal();
     nextPetalAt =
